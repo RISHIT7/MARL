@@ -10,6 +10,10 @@
 - Deterministic arrivals: P(⟨z_d,z1,τ⟩) for simplification
 - Horizon H=10, vessels in transit at end counted per formula
 - Maintains invariant: n_arr(z) = Σ_z' n_nxt(z,z') at all times
+
+Questions
+- What should be the intial action ?
+- Reverse zones is possible ?
 """
 
 import numpy as np
