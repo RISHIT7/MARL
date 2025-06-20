@@ -463,7 +463,7 @@ def train_maritime_agent(episodes=500, visualize_every=50):
         episode_reward = 0
         
         while True:
-            action = agent.select_action()
+            action = agent.select_action(state)
             next_state, reward, done, info = env.step(action)
             
             trajectory.append((state, action, reward))
