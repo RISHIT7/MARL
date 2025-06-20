@@ -10,6 +10,10 @@
 - Deterministic arrivals: P(⟨z_d,z1,τ⟩) for simplification
 - Horizon H=10, vessels in transit at end counted per formula
 - Maintains invariant: n_arr(z) = Σ_z' n_nxt(z,z') at all times
+
+Questions
+- What should be the intial action ?
+- Reverse zones is possible ?
 """
 
 import numpy as np
@@ -32,7 +36,7 @@ class MaritimeTrafficEnv(gym.Env):
         # Valid transitions (chain + reverse)
         self.valid_transitions = [
             ('z_dummy', 'z1'), ('z1', 'z2'), ('z2', 'z3'), ('z3', 'z4'),
-            ('z4', 'z3'), ('z3', 'z2'), ('z2', 'z1'), ('z1', 'z_dummy')
+            ('z3', 'z2'), ('z2', 'z1')
         ]
         
         # State space dimensions
@@ -53,6 +57,7 @@ class MaritimeTrafficEnv(gym.Env):
         # Zone capacities for reward computation
         self.capacities = {z: 5 for z in self.zones}
         self.w_r = 1.0
+        self.w_d = 1.0
         
         self.reset()
 
@@ -214,8 +219,8 @@ class MaritimeTrafficEnv(gym.Env):
         for z in self.zones:
             if z != 'z4':  # Terminal zone doesn't have congestion
                 excess = max(n_tot[z] - self.capacities[z], 0)
-                total_penalty += self.w_r * excess + self.w_r
-                
+                total_penalty += self.w_r * excess + self.w_d * excess
+
         return -total_penalty
 
 
