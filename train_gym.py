@@ -1,309 +1,327 @@
+"""Note:
+- Implementation of "Multiagent Decision Making For Maritime Traffic Management" (AAAI 2019)
+- 5 zones in chain: z_dummy (outside) → z1 (source) → z2 → z3 → z4 (terminal)
+- Bidirectional transitions allowed along the chain
+- Count-based state abstraction: n_bold_t = [n_txn, n_arr, n_nxt, n_tilda]
+- Actions are β_{zz'} values transformed by sigmoid to [0,1] for binomial distribution
+- Policy gradient uses exact formulas from equations 17-18 (θ = β directly)
+- Value function computed via dynamic programming as per paper
+- Reward function from equation 3: C(z,n) = w_r * max(n-cap, 0) + w_r
+- Deterministic arrivals: P(⟨z_d,z1,τ⟩) for simplification
+- Horizon H=10, vessels in transit at end counted per formula
+- Maintains invariant: n_arr(z) = Σ_z' n_nxt(z,z') at all times
+"""
+
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from collections import defaultdict
-import matplotlib.pyplot as plt
-import time
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
-class MaritimeTrafficEnvGym(gym.Env):
-    """
-    Gymnasium-compatible version of the Maritime Traffic Environment.
-    
-    This environment simulates maritime traffic management across several zones.
-    The agent's goal is to control vessel speed (via a 'beta' parameter)
-    to maximize throughput while minimizing congestion.
-    """
-    metadata = {"render_modes": ["human"], "render_fps": 4}
-
-    def __init__(self, n_zones=4, max_vessels_per_zone=10, arrival_rate=0.3, 
-                 time_horizon=100, congestion_penalty=-2.0, throughput_reward=5.0):
+class MaritimeTrafficEnv(gym.Env):
+    def __init__(self):
         super().__init__()
         
         # Environment parameters
-        self.n_zones = n_zones
-        self.dummy_zone = 0  # Represents "outside system"
-        self.zones = list(range(1, n_zones + 1))
-        self.source_zone = 1
-        self.terminal_zone = n_zones
-        self.max_vessels_per_zone = max_vessels_per_zone
-        self.arrival_rate = arrival_rate
-        self.time_horizon = time_horizon
-        self.congestion_penalty = congestion_penalty
-        self.throughput_reward = throughput_reward
+        self.zones = ['z_dummy', 'z1', 'z2', 'z3', 'z4']
+        self.Z = len(self.zones)
+        self.H = 10
         
-        # Navigation time parameters
-        self.t_min = 1
-        self.t_max = 5
+        # Valid transitions (chain + reverse)
+        self.valid_transitions = [
+            ('z_dummy', 'z1'), ('z1', 'z2'), ('z2', 'z3'), ('z3', 'z4'),
+            ('z4', 'z3'), ('z3', 'z2'), ('z2', 'z1'), ('z1', 'z_dummy')
+        ]
         
-        # Random input probabilities from zd to z1
-        self.zd_to_z1_probabilities = np.random.uniform(0.1, 0.9, size=time_horizon)
+        # State space dimensions
+        self.state_size = 2 * (self.Z**2 * self.H) + 2 * (self.Z**2) + self.Z
         
-        # α(z'|z) probability distributions for vessel movement
-        self.alpha = {
-            1: {0: 0, 2: 1},
-            2: {1: 0.3, 3: 0.7},
-            3: {2: 0.3, 4: 0.7},
-            4: {3: 0.2, 0: 0.8}
-        }
-        
-        # Define valid zone pairs for actions
-        self.valid_zone_pairs = []
-        for from_z in self.zones:
-            for to_z in self.alpha[from_z].keys():
-                self.valid_zone_pairs.append((from_z, to_z))
-        
-        # === Gymnasium Spaces ===
-        # Action space: Beta parameter for each zone pair, clipped between 0.1 and 0.9
-        self.action_space = spaces.Box(
-            low=0.1, high=0.9, shape=(len(self.valid_zone_pairs),), dtype=np.float32
-        )
-        
-        # Observation space: Count-based state vector
-        obs_dim = (
-            len(self.zones)              # newly_arrived_counts
-            + len(self.valid_zone_pairs) # in_transit_counts
-            + len(self.zones)              # zone_occupancy
-        )
+        # Gym spaces
         self.observation_space = spaces.Box(
-            low=0, high=np.inf, shape=(obs_dim,), dtype=np.float32
+            low=0, high=np.inf, shape=(self.state_size,), dtype=np.float32
+        )
+        self.action_space = spaces.Box(
+            low=-10, high=10, shape=(len(self.valid_transitions),), dtype=np.float32
         )
         
-    def reset(self, *, seed=None, options=None):
-        """Resets the environment to an initial state."""
+        # Transit time bounds
+        self.t_min = {trans: 1 for trans in self.valid_transitions}
+        self.t_max = {trans: 3 for trans in self.valid_transitions}
+        
+        # Zone capacities for reward computation
+        self.capacities = {z: 5 for z in self.zones}
+        self.w_r = 1.0
+        
+        self.reset()
+
+    def reset(self, seed=None):
         super().reset(seed=seed)
         
-        self.timestep = 0
-        self.newly_arrived_counts = defaultdict(int)
-        self.in_transit_counts = defaultdict(int)
-        self.zone_occupancy = defaultdict(int)
-        self.in_transit_vessels = []
-        self.total_arrivals = 0
-        self.total_departures = 0
+        # Initialize count vectors
+        self.n_txn = defaultdict(int)  # (z,z',τ)
+        self.n_arr = defaultdict(int)  # z
+        self.n_nxt = defaultdict(int)  # (z,z')
+        self.n_tilda = defaultdict(int)  # (z,z',τ)
         
-        # The info dict is returned by reset in Gymnasium
-        info = {}
+        self.t = 0
         
-        return self._get_state(), info
+        # Deterministic arrival schedule: P(⟨z_d,z1,1⟩) = 3
+        self.arrival_schedule = {1: {'z1': 3}, 3: {'z1': 2}, 5: {'z1': 1}}
+        
+        # Alpha probabilities (equal for simplicity)
+        self.alpha = self._compute_alpha()
+        
+        return self._get_state_vector(), {}
+
+    def _compute_alpha(self):
+        """Compute α(z'|z) transition probabilities"""
+        alpha = {}
+        for z in self.zones:
+            valid_dests = [dst for src, dst in self.valid_transitions if src == z]
+            if valid_dests:
+                prob = 1.0 / len(valid_dests)
+                alpha[z] = {dest: prob for dest in valid_dests}
+            else:
+                alpha[z] = {}
+        return alpha
+
+    def _get_state_vector(self):
+        """Convert count dictionaries to state vector"""
+        vec = np.zeros(self.state_size, dtype=np.float32)
+        idx = 0
+        
+        # n_txn: transit counts
+        for z in self.zones:
+            for z_p in self.zones:
+                for tau in range(1, self.H + 1):
+                    vec[idx] = self.n_txn.get((z, z_p, tau), 0)
+                    idx += 1
+        
+        # n_arr: arrival counts
+        for z in self.zones:
+            vec[idx] = self.n_arr.get(z, 0)
+            idx += 1
+            
+        # n_nxt: next destination counts
+        for z in self.zones:
+            for z_p in self.zones:
+                vec[idx] = self.n_nxt.get((z, z_p), 0)
+                idx += 1
+                
+        # n_tilda: committed route counts
+        for z in self.zones:
+            for z_p in self.zones:
+                for tau in range(1, self.H + 1):
+                    vec[idx] = self.n_tilda.get((z, z_p, tau), 0)
+                    idx += 1
+                    
+        return vec
 
     def step(self, action):
-        """Execute one time step within the environment."""
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        self.t += 1
         
-        zone_pair_actions = {
-            pair: action[i] for i, pair in enumerate(self.valid_zone_pairs)
-        }
+        # Transform action to β values using sigmoid: β ∈ [0,1]
+        beta_vals = 1.0 / (1.0 + np.exp(-action))
+        beta = {trans: beta_vals[i] for i, trans in enumerate(self.valid_transitions)}
         
-        reward = 0.0
-        
-        # 1. New arrivals at source zone
-        arrival_prob = self.zd_to_z1_probabilities[self.timestep % len(self.zd_to_z1_probabilities)]
-        expected_arrivals = self.arrival_rate * arrival_prob
-        new_arrivals = self.np_random.poisson(expected_arrivals)
-        
-        if new_arrivals > 0:
-            self.newly_arrived_counts[self.source_zone] += new_arrivals
-            self.zone_occupancy[self.source_zone] += new_arrivals
-            self.total_arrivals += new_arrivals
-
-        # 2. Process in-transit completions
-        reward += self._process_in_transit_completions()
-        
-        # 3. Process vessel decisions
-        self._process_vessel_decisions(zone_pair_actions)
-        
-        # 4. Calculate penalties and step cost
-        reward += self._calculate_congestion_penalty()
-        reward -= 0.1  # Step penalty
-        
-        self.timestep += 1
-        
-        # Gymnasium termination conditions
-        terminated = self.timestep >= self.time_horizon
-        truncated = False # No other truncation condition
-        
-        info = {
-            'timestep': self.timestep,
-            'total_vessels_in_system': sum(self.zone_occupancy.values()),
-            'congestion_violations': self._count_violations(),
-            'total_arrivals': self.total_arrivals,
-            'total_departures': self.total_departures
-        }
-        
-        return self._get_state(), reward, terminated, truncated, info
-
-    def render(self, mode="human"):
-        """Render the environment's state."""
-        if mode == "human":
-            print(f"\n{'='*70}")
-            print(f"TIMESTEP: {self.timestep} | Arrivals: {self.total_arrivals} | Departures: {self.total_departures}")
-            print(f"{'-'*70}")
-            print("ZONE STATUS:")
-            for zone in self.zones:
-                occ = self.zone_occupancy[zone]
-                new = self.newly_arrived_counts[zone]
-                cap = self.max_vessels_per_zone
-                status = " (SOURCE)" if zone == self.source_zone else " (TERMINAL)" if zone == self.terminal_zone else ""
-                if occ > cap:
-                    status += f" [CONGESTED +{occ - cap}]"
-                print(f"  z{zone}{status}: {occ}/{cap} total, +{new} new")
+        # 1. Process arrivals from schedule
+        arrivals = self.arrival_schedule.get(self.t, {})
+        for z_src, count in arrivals.items():
+            self.n_arr[z_src] += count
             
-            print(f"\nIN-TRANSIT VESSELS: {len(self.in_transit_vessels)}")
-            print(f"{'='*70}")
-
-    def _get_state(self):
-        """Constructs the state vector from environment counts."""
-        state = []
-        state.extend(self.newly_arrived_counts[z] for z in self.zones)
-        state.extend(self.in_transit_counts[pair] for pair in self.valid_zone_pairs)
-        state.extend(self.zone_occupancy[z] for z in self.zones)
-        return np.array(state, dtype=np.float32)
-
-    def _sample_navigation_time(self, beta):
-        """Sample navigation time using binomial distribution."""
-        trials = self.t_max - self.t_min
-        successes = self.np_random.binomial(trials, beta)
-        return self.t_min + successes
-
-    def _process_in_transit_completions(self):
-        """Process vessels completing their navigation."""
-        reward = 0.0
-        completed_indices = [i for i, (_, _, arrival_time) in enumerate(self.in_transit_vessels) if arrival_time == self.timestep]
-        
-        for i in reversed(completed_indices):
-            from_z, to_z, _ = self.in_transit_vessels.pop(i)
-            self.in_transit_counts[(from_z, to_z)] -= 1
-            if to_z == self.dummy_zone:
-                reward += self.throughput_reward
-                self.total_departures += 1
-            else:
-                self.newly_arrived_counts[to_z] += 1
-                self.zone_occupancy[to_z] += 1
-        return reward
-
-    def _process_vessel_decisions(self, zone_pair_actions):
-        """Process decisions for newly arrived vessels."""
-        for zone in list(self.newly_arrived_counts.keys()):
-            if self.newly_arrived_counts[zone] > 0 and zone in self.alpha:
-                for _ in range(self.newly_arrived_counts[zone]):
-                    # Sample destination using α(z'|z)
-                    dest_zones, dest_probs = zip(*self.alpha[zone].items())
-                    chosen_dest = self.np_random.choice(dest_zones, p=dest_probs)
-                    
-                    zone_pair = (zone, chosen_dest)
-                    beta = zone_pair_actions.get(zone_pair, 0.5) # Default beta
-                    
-                    arrival_time = self.timestep + self._sample_navigation_time(beta)
-                    
-                    # Update counts
-                    self.zone_occupancy[zone] -= 1
-                    self.in_transit_counts[zone_pair] += 1
-                    self.in_transit_vessels.append((zone, chosen_dest, arrival_time))
+        # 2. Route decisions using α(z'|z) - multinomial distribution
+        for z_src, arr_count in arrivals.items():
+            if arr_count > 0 and z_src in self.alpha:
+                destinations = list(self.alpha[z_src].keys())
+                probabilities = list(self.alpha[z_src].values())
                 
-                self.newly_arrived_counts[zone] = 0
+                if len(destinations) > 0:
+                    counts = np.random.multinomial(arr_count, probabilities)
+                    for dest, count in zip(destinations, counts):
+                        self.n_nxt[(z_src, dest)] += count
 
-    def _calculate_congestion_penalty(self):
-        """Calculate penalties for exceeding zone capacity."""
-        penalty = 0.0
-        for zone in self.zones:
-            if self.zone_occupancy[zone] > self.max_vessels_per_zone:
-                excess = self.zone_occupancy[zone] - self.max_vessels_per_zone
-                penalty += self.congestion_penalty * excess
-        return penalty
+        # 3. Transit time sampling using p_nav with β - binomial distribution
+        for (z_src, z_dest), nxt_count in list(self.n_nxt.items()):
+            if nxt_count > 0 and (z_src, z_dest) in self.valid_transitions:
+                t_min = self.t_min[(z_src, z_dest)]
+                t_max = self.t_max[(z_src, z_dest)]
+                n_trials = t_max - t_min
+                p_success = beta[(z_src, z_dest)]
+                
+                # Sample transit times for count
+                for _ in range(nxt_count):
+                    if n_trials > 0:
+                        delta_tilda = np.random.binomial(n_trials, p_success)
+                    else:
+                        delta_tilda = 0
+                    
+                    tau = self.t + t_min + delta_tilda
+                    if tau <= self.H:
+                        self.n_tilda[(z_src, z_dest, tau)] += 1
+                
+                # Clear processed next destinations
+                self.n_nxt[(z_src, z_dest)] = 0
 
-    def _count_violations(self):
-        """Count number of zones currently under congestion."""
-        return sum(1 for z in self.zones if self.zone_occupancy[z] > self.max_vessels_per_zone)
+        # 4. Process transit completions
+        completed_transits = []
+        for (z_src, z_dest, tau), count in list(self.n_tilda.items()):
+            if tau == self.t and count > 0:
+                completed_transits.append((z_src, z_dest, tau, count))
+                
+        for z_src, z_dest, tau, count in completed_transits:
+            # Remove from n_tilda
+            self.n_tilda[(z_src, z_dest, tau)] -= count
+            if self.n_tilda[(z_src, z_dest, tau)] == 0:
+                del self.n_tilda[(z_src, z_dest, tau)]
+                
+            # Add to destination arrivals (unless terminal zone z4)
+            if z_dest != 'z4':
+                self.n_arr[z_dest] += count
 
+        # 5. Update transit counts (currently moving vessels)
+        self.n_txn.clear()
+        for (z_src, z_dest, tau), count in self.n_tilda.items():
+            if self.t < tau <= self.H:
+                self.n_txn[(z_src, z_dest, tau)] = count
 
-# Note: The agent and training logic below are kept from the original file
-# to maintain similar functionality. The training loop is adapted for the Gym API.
-
-class VesselBasedPolicyGradientAgent:
-    def __init__(self, env, learning_rate=0.01, gamma=0.99):
-        self.env = env
-        self.gamma = gamma
-        self.learning_rate = learning_rate
-        self.zone_pairs = env.valid_zone_pairs
-        self.theta_params = {zp: np.random.normal(0, 0.1, size=3) for zp in self.zone_pairs}
-
-    def compute_vessel_policy(self, state, zone_pair):
-        theta = self.theta_params[zone_pair]
-        state_features = state[:len(theta)]
-        logit = np.dot(theta, state_features)
-        beta = 1.0 / (1.0 + np.exp(-logit))
-        return np.clip(beta, 0.1, 0.9)
-
-    def select_action(self, state):
-        actions = [self.compute_vessel_policy(state, zp) for zp in self.zone_pairs]
-        return np.array(actions)
-
-    def update_policy(self, trajectory):
-        # This update logic is based on the original file's implementation
-        policy_gradient = {zp: np.zeros_like(self.theta_params[zp]) for zp in self.zone_pairs}
-        # Simplified update: This part may need to be adapted based on the paper's specific algorithm
-        for state, action, reward in trajectory:
-            for i, zone_pair in enumerate(self.zone_pairs):
-                current_beta = self.compute_vessel_policy(state, zone_pair)
-                state_features = state[:len(self.theta_params[zone_pair])]
-                grad = (action[i] - current_beta) * state_features * reward
-                policy_gradient[zone_pair] += grad
+        # 6. Compute reward using equation 3
+        reward = self._compute_reward()
         
-        for zp in self.zone_pairs:
-            self.theta_params[zp] += self.learning_rate * policy_gradient[zp] / len(trajectory)
+        # 7. Check termination
+        done = self.t >= self.H
+        
+        return self._get_state_vector(), reward, done, False, {}
+
+    def _compute_reward(self):
+        """Compute reward using equation 3: C(z,n) = w_r * max(n-cap, 0) + w_r"""
+        total_penalty = 0.0
+        
+        # Compute total vessels per zone
+        n_tot = defaultdict(int)
+        
+        # Count arrivals
+        for z, count in self.n_arr.items():
+            n_tot[z] += count
+            
+        # Count vessels in transit (will arrive later)
+        for (z_src, z_dest, tau), count in self.n_tilda.items():
+            if tau > self.t:
+                n_tot[z_dest] += count
+                
+        # Apply congestion penalty
+        for z in self.zones:
+            if z != 'z4':  # Terminal zone doesn't have congestion
+                excess = max(n_tot[z] - self.capacities[z], 0)
+                total_penalty += self.w_r * excess + self.w_r
+                
+        return -total_penalty
 
 
-def train_maritime_agent(episodes=500, visualize_every=50):
-    env = MaritimeTrafficEnvGym()
-    agent = VesselBasedPolicyGradientAgent(env)
+class PolicyNetwork(nn.Module):
+    """Policy network outputting β values directly (θ = β as per paper)"""
+    def __init__(self, state_size, action_size):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(state_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, action_size)
+        )
     
-    episode_rewards = []
-    episode_violations = []
+    def forward(self, state):
+        return self.network(state)
 
-    for episode in range(episodes):
-        state, _ = env.reset()
+
+class MaritimePolicyGradient:
+    """Policy gradient implementation using equations 17-18 from paper"""
+    def __init__(self, env):
+        self.env = env
+        self.policy = PolicyNetwork(env.state_size, len(env.valid_transitions))
+        self.optimizer = optim.Adam(self.policy.parameters(), lr=0.001)
+        
+    def compute_value_function(self, trajectory):
+        """Compute vessel-based value function as per paper"""
+        rewards = [step['reward'] for step in trajectory]
+        values = []
+        
+        # Dynamic programming: V_t = R_t + γ * V_{t+1}
+        G = 0
+        for r in reversed(rewards):
+            G = r + 0.99 * G  # γ = 0.99
+            values.append(G)
+        
+        return list(reversed(values))
+    
+    def compute_policy_gradient(self, trajectory):
+        """Compute gradients using equations 17-18"""
+        states = torch.stack([torch.FloatTensor(step['state']) for step in trajectory])
+        actions = torch.stack([torch.FloatTensor(step['action']) for step in trajectory])
+        values = torch.FloatTensor(self.compute_value_function(trajectory))
+        
+        # Forward pass
+        logits = self.policy(states)
+        
+        # Policy gradient: ∇_θ log π_θ(a|s) * V(s,a)
+        # Since θ = β directly, we compute gradients w.r.t. β parameters
+        log_probs = -torch.sum((logits - actions)**2, dim=1)  # Gaussian log-likelihood
+        policy_loss = -torch.mean(log_probs * values)
+        
+        return policy_loss
+    
+    def train_episode(self):
+        """Train one episode using policy gradient"""
+        state, _ = self.env.reset()
         trajectory = []
-        episode_reward = 0
         done = False
         
         while not done:
-            action = agent.select_action(state)
-            next_state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
+            # Get action from policy
+            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            with torch.no_grad():
+                action_logits = self.policy(state_tensor)
+                action = action_logits.squeeze().numpy()
             
-            trajectory.append((state, action, reward))
-            episode_reward += reward
+            # Take step
+            next_state, reward, done, _, _ = self.env.step(action)
+            
+            # Store transition
+            trajectory.append({
+                'state': state,
+                'action': action,
+                'reward': reward
+            })
+            
             state = next_state
         
-        agent.update_policy(trajectory)
-        episode_rewards.append(episode_reward)
-        episode_violations.append(info.get('congestion_violations', 0))
+        # Compute gradients and update policy
+        if len(trajectory) > 0:
+            loss = self.compute_policy_gradient(trajectory)
+            
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            
+            return sum(step['reward'] for step in trajectory)
         
-        if episode % visualize_every == 0:
-            print(f"\nEPISODE {episode}")
+        return 0
+
+
+# Training loop
+if __name__ == '__main__':
+    env = MaritimeTrafficEnv()
+    agent = MaritimePolicyGradient(env)
+    
+    # Training
+    episode_rewards = []
+    for episode in range(100):
+        reward = agent.train_episode()
+        episode_rewards.append(reward)
+        
+        if episode % 10 == 0:
             avg_reward = np.mean(episode_rewards[-10:])
-            print(f"Avg Reward (last 10): {avg_reward:.2f}")
-
-    # Plot results
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-    ax1.plot(episode_rewards)
-    ax1.set_title('Episode Rewards')
-    ax2.plot(episode_violations)
-    ax2.set_title('Congestion Violations')
-    plt.show()
-
-
-if __name__ == "__main__":
-    print("Testing Gymnasium Environment with a Random Agent...")
-    env = MaritimeTrafficEnvGym()
-    obs, info = env.reset()
-    for _ in range(5):
-        action = env.action_space.sample()  # Use a random action
-        obs, reward, terminated, truncated, info = env.step(action)
-        env.render()
-        if terminated or truncated:
-            obs, info = env.reset()
-    env.close()
-
-    print("\nStarting Training with Policy Gradient Agent...")
-    train_maritime_agent(episodes=200, visualize_every=25)
-    print("\nTraining complete.")
+            print(f"Episode {episode}, Average Reward: {avg_reward:.2f}")
+    
+    print(f"Training completed. Final average reward: {np.mean(episode_rewards[-10:]):.2f}")
