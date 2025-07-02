@@ -2,3 +2,7 @@ matplotlib
 gymnasium
 torch
 numpy
+networkx
+matplotlib
+plotly
+dash
