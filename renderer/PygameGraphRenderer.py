@@ -27,16 +27,24 @@ class PygameGraphRenderer:
         self._layout_nodes()
 
     def _layout_nodes(self):
-        """Assign fixed positions for nodes using circular layout."""
-        angle_step = 2 * math.pi / len(self.zones)
-        center_x, center_y = self.width // 2, self.height // 2
-        radius = 250
-        for i, z in enumerate(self.zones):
-            angle = i * angle_step
-            x = center_x + int(radius * math.cos(angle))
-            y = center_y + int(radius * math.sin(angle))
-            self.base_pos[z] = (x, y)  # Store base position
-            self.pos[z] = (x, y)  # Current transformed position
+        """Automatically assign node positions using NetworkX's spring layout."""
+        self.base_pos = {}
+        self.pos = {}
+
+        # Compute layout using spring_layout
+        layout = nx.spring_layout(
+            self.graph,
+            scale=min(self.width, self.height) * 0.4,  # fit within window size
+            center=(self.width // 2, self.height // 2),
+            seed=42  # for reproducibility
+        )
+
+        # Store computed positions
+        for z in self.zones:
+            x, y = layout[z]
+            self.base_pos[z] = (int(x), int(y))
+            self.pos[z] = (int(x), int(y))
+
     
     def set_zoom(self, zoom_level):
         """Set the zoom level and update node positions."""
@@ -64,30 +72,42 @@ class PygameGraphRenderer:
 
     def update(self, node_values, edge_weights):
         """Draw updated node and edge states."""
-        self.screen.fill((255, 255, 255))  # white background
+        self.screen.fill((0, 0, 0))  # black background
 
         # Draw edges
+        import pygame.gfxdraw
         for (src, dst) in self.graph.edges():
             weight = edge_weights.get((src, dst), 0)
             start = self.pos[src]
             end = self.pos[dst]
             line_width = max(1, int(1 + weight // 5))
-            pygame.draw.line(self.screen, (200, 200, 200), start, end, line_width)
+            # Draw anti-aliased lines for edges (fallback to normal line for width>1)
+            # if line_width == 1:
+            pygame.gfxdraw.line(self.screen, start[0], start[1], end[0], end[1], (200, 200, 200))
+            # else:
+            #     pygame.draw.line(self.screen, (200, 200, 200), start, end, line_width)
 
         # Draw nodes
         for z in self.zones:
             x, y = self.pos[z]
             count = node_values.get(z, 0)
             color = (100, 100, 255)
-            radius = max(10, int(20 * self.zoom))  # Scale node size with zoom
-            pygame.draw.circle(self.screen, color, (x, y), radius)
-            
             # Scale font with zoom
             font_size = max(12, int(20 * self.zoom))
             font = pygame.font.SysFont(None, font_size)
-            label = font.render(f"{z}:{count}", True, (0, 0, 0))
-            label_x = x - label.get_width() // 2
-            label_y = y - label.get_height() // 2
+            label_text = f"{z}:{count}"
+            label = font.render(label_text, True, (255, 255, 255))  # white text
+            # Calculate radius based on text size with padding
+            padding = 10
+            text_width, text_height = label.get_width(), label.get_height()
+            radius = int(max(text_width, text_height) / 2 + padding)
+            # Draw node as a circle with only a colored boundary (outline), inside is black, using anti-aliased gfxdraw
+            pygame.gfxdraw.filled_circle(self.screen, x, y, radius, (0, 0, 0))  # fill with black
+            pygame.gfxdraw.aacircle(self.screen, x, y, radius, (255,255,255))  # anti-aliased outline
+            pygame.gfxdraw.aacircle(self.screen, x, y, radius-1, (255,255,255))  # thicker outline
+            # Draw label centered
+            label_x = x - text_width // 2
+            label_y = y - text_height // 2
             self.screen.blit(label, (label_x, label_y))
 
         pygame.display.flip()
