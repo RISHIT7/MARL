@@ -4,6 +4,7 @@ import networkx as nx
 import math
 import sys
 import os
+import time
 
 # Add the parent directory to the path so we can import from environment
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,41 +20,61 @@ class PygameGraphRenderer:
         self.graph = nx.DiGraph()
         self.zones = zones
         self.pos = {}
-        self.base_pos = {}  # Store original positions
+        self.base_pos = {}
         self.running = True
-        
         # Zoom and pan variables
         self.zoom = 1.0
         self.pan_x = 0
         self.pan_y = 0
-        
         # Traffic flow animation toggle
         self.show_traffic_flow = show_traffic_flow
-
+        # Font cache for performance
+        self.font_cache = {}
         # Build graph structure
         self.graph.add_nodes_from(zones)
         self.graph.add_edges_from(valid_transitions)
         self._layout_nodes()
 
     def _layout_nodes(self):
-        """Automatically assign node positions using NetworkX's spring layout."""
+        """Assign node positions. Draw dummy node above, others in grid."""
         self.base_pos = {}
         self.pos = {}
-
-        # Compute layout using spring_layout
-        layout = nx.spring_layout(
-            self.graph,
-            scale=min(self.width, self.height) * 0.4,  # fit within window size
-            center=(self.width // 2, self.height // 2),
-            seed=42  # for reproducibility
-        )
-
-        # Store computed positions
-        for z in self.zones:
-            x, y = layout[z]
-            self.base_pos[z] = (int(x), int(y))
-            self.pos[z] = (int(x), int(y))
-
+        num_nodes = len(self.zones)
+        if num_nodes >= 100:
+            # Draw dummy node (assume first in self.zones) above the grid
+            margin = 40
+            grid_nodes = self.zones[1:]
+            grid_cols = math.ceil(math.sqrt(len(grid_nodes)))
+            grid_rows = math.ceil(len(grid_nodes) / grid_cols)
+            grid_width = self.width - 2 * margin
+            grid_height = self.height - 2 * margin
+            cell_w = grid_width // max(1, grid_cols-1) if grid_cols > 1 else grid_width
+            cell_h = grid_height // max(1, grid_rows-1) if grid_rows > 1 else grid_height
+            # Dummy node centered above grid
+            dummy_x = self.width // 2
+            dummy_y = margin // 2
+            self.base_pos[self.zones[0]] = (dummy_x, dummy_y)
+            self.pos[self.zones[0]] = (dummy_x, dummy_y)
+            # Grid nodes
+            for idx, z in enumerate(grid_nodes):
+                row = idx // grid_cols
+                col = idx % grid_cols
+                x = margin + col * cell_w
+                y = margin + row * cell_h + margin  # leave space for dummy node
+                self.base_pos[z] = (int(x), int(y))
+                self.pos[z] = (int(x), int(y))
+        else:
+            # Use spring layout for small/medium graphs
+            layout = nx.spring_layout(
+                self.graph,
+                scale=min(self.width, self.height) * 0.4,
+                center=(self.width // 2, self.height // 2),
+                seed=42
+            )
+            for z in self.zones:
+                x, y = layout[z]
+                self.base_pos[z] = (int(x), int(y))
+                self.pos[z] = (int(x), int(y))
     
     def set_zoom(self, zoom_level):
         """Set the zoom level and update node positions."""
@@ -89,184 +110,134 @@ class PygameGraphRenderer:
             self.pos[z] = (int(final_x), int(final_y))
 
     def update(self, node_values, edge_weights):
-        """Draw updated node and edge states."""
-        self.screen.fill((20, 20, 30))  # Dark blue-gray background for night road feel
-
-        # Draw roads (edges) with traffic visualization
-        import pygame.gfxdraw
+        """Draw updated node and edge states. Further optimized for large graphs."""
+        screen = self.screen
+        zones = self.zones
+        pos = self.pos
+        zoom = self.zoom
+        show_traffic_flow = self.show_traffic_flow
+        node_count = len(zones)
+        screen.fill((20, 20, 30))
+        # Precompute edge drawing mode
+        use_straight_lines = node_count > 200
+        # Precompute font for nodes
+        font_size = max(8, int(12 * zoom))
+        font = self._get_font(font_size)
+        # Draw edges
+        min_width = 2
+        max_width = int(12 * zoom)
         for (src, dst) in self.graph.edges():
             weight = edge_weights.get((src, dst), 0) + node_values.get((src, dst), 0)
-            start = self.pos[src]
-            end = self.pos[dst]
-            
-            # Road width based on traffic (simple linear scaling)
-            min_width = 2
-            max_width = int(12 * self.zoom)
+            start = pos[src]
+            end = pos[dst]
             if weight == 0:
                 road_width = min_width
             else:
-                # Linear scaling from min to max based on weight
-                normalized_weight = min(weight / 20.0, 1.0)  # Normalize to 0-1 range
+                normalized_weight = min(weight / 20.0, 1.0)
                 road_width = int(min_width + normalized_weight * (max_width - min_width))
-
-            # Traffic intensity color (green = low traffic, yellow = medium, red = high)
+            # Traffic intensity color
             if weight == 0:
-                traffic_color = (60, 60, 60)  # Dark gray for no traffic
+                traffic_color = (60, 60, 60)
             elif weight <= 5:
-                # Green to yellow gradient (light traffic)
                 intensity = weight / 5.0
                 traffic_color = (int(50 + intensity * 155), int(150 + intensity * 105), 50)
             elif weight <= 15:
-                # Yellow to red gradient (medium traffic)
                 intensity = (weight - 5) / 10.0
                 traffic_color = (int(205 + intensity * 50), int(255 - intensity * 100), 50)
             else:
-                # High traffic - bright red
                 traffic_color = (255, 50, 50)
-            
-            # Draw curved road with rounded ends (pill shape)
-            self._draw_curved_road(start, end, road_width, traffic_color)
-            
-            # Add traffic flow animation (moving dots for high traffic) - toggleable
-            if self.show_traffic_flow and weight > 3:
+            if use_straight_lines:
+                pygame.draw.line(screen, traffic_color, start, end, max(1, road_width))
+            else:
+                self._draw_curved_road(start, end, road_width, traffic_color)
+            if show_traffic_flow and weight > 3 and not use_straight_lines:
                 self._draw_traffic_flow(start, end, weight, traffic_color)
-
-        # Draw simple junction markers
-        for z in self.zones:
-            x, y = self.pos[z]
-            
-            # Simple junction marker - small white circle
-            junction_radius = max(3, int(5 * self.zoom))
-            pygame.gfxdraw.filled_circle(self.screen, x, y, junction_radius, (255, 255, 255))
-            pygame.gfxdraw.aacircle(self.screen, x, y, junction_radius, (200, 200, 200))
-            
-            # Junction label
-            font_size = max(8, int(12 * self.zoom))
-            font = pygame.font.SysFont('Arial', font_size, bold=True)
-            label_text = f"{z}"
-            
-            # Main label
+        # Draw nodes and labels
+        junction_radius = max(3, int(5 * zoom))
+        for z in zones:
+            x, y = pos[z]
+            pygame.draw.circle(screen, (255, 255, 255), (x, y), junction_radius)
+            pygame.draw.circle(screen, (200, 200, 200), (x, y), junction_radius, 1)
+            label_text = str(z)
             label = font.render(label_text, True, (255, 255, 255))
             label_x = x - label.get_width() // 2
             label_y = y - junction_radius - label.get_height() - 2
-            
-            # Add text shadow for better readability
             shadow = font.render(label_text, True, (0, 0, 0))
-            self.screen.blit(shadow, (label_x + 1, label_y + 1))
-            self.screen.blit(label, (label_x, label_y))
-
-        # Add legend
-        self._draw_legend()
-
+            screen.blit(shadow, (label_x + 1, label_y + 1))
+            screen.blit(label, (label_x, label_y))
+        self._draw_legend(font)
         pygame.display.flip()
         self.clock.tick(30)
+
+    def _get_font(self, size):
+        if size not in self.font_cache:
+            self.font_cache[size] = pygame.font.SysFont('Arial', size, bold=True)
+        return self.font_cache[size]
     
     def _draw_curved_road(self, start, end, width, color):
         """Draw a road with rounded ends (pill shape)."""
-        import pygame.gfxdraw
-        import math
-        
         if width < 1:
             return
-            
         x1, y1 = start
         x2, y2 = end
-        
-        # Ensure color is a proper tuple of integers
-        color = tuple(int(c) for c in color[:3])  # Take only RGB, ensure integers
-        
-        # Calculate the distance and angle
+        color = tuple(int(c) for c in color[:3])
         dx = x2 - x1
         dy = y2 - y1
         length = math.sqrt(dx*dx + dy*dy)
-        
         if length == 0:
-            # Single point - draw a circle
             radius = width // 2
             if radius > 0:
-                pygame.gfxdraw.filled_circle(self.screen, x1, y1, radius, color)
-                pygame.gfxdraw.aacircle(self.screen, x1, y1, radius, color)
+                pygame.draw.circle(self.screen, color, (x1, y1), radius)
             return
-        
-        # Normalize the direction vector
         dx_norm = dx / length
         dy_norm = dy / length
-        
-        # Calculate perpendicular vector for width
         perp_x = -dy_norm * (width / 2)
         perp_y = dx_norm * (width / 2)
-        
-        # Calculate the four corners of the rectangle
         corners = [
             (int(x1 + perp_x), int(y1 + perp_y)),
             (int(x1 - perp_x), int(y1 - perp_y)),
             (int(x2 - perp_x), int(y2 - perp_y)),
             (int(x2 + perp_x), int(y2 + perp_y))
         ]
-        
-        # Draw the main rectangle body using regular pygame.draw for better compatibility
         pygame.draw.polygon(self.screen, color, corners)
-        
-        # Draw rounded ends (circles at both ends)
         radius = width // 2
         if radius > 0:
-            # Start circle
-            pygame.gfxdraw.filled_circle(self.screen, x1, y1, radius, color)
-            pygame.gfxdraw.aacircle(self.screen, x1, y1, radius, color)
-            
-            # End circle
-            pygame.gfxdraw.filled_circle(self.screen, x2, y2, radius, color)
-            pygame.gfxdraw.aacircle(self.screen, x2, y2, radius, color)
+            pygame.draw.circle(self.screen, color, (x1, y1), radius)
+            pygame.draw.circle(self.screen, color, (x2, y2), radius)
     
     def _draw_traffic_flow(self, start, end, weight, color):
         """Draw animated traffic flow dots on roads."""
-        import time
-        import math
-        
-        # Calculate road direction and length
         dx = end[0] - start[0]
         dy = end[1] - start[1]
         length = math.sqrt(dx*dx + dy*dy)
-        
         if length == 0:
             return
-            
-        # Normalize direction
         dx_norm = dx / length
         dy_norm = dy / length
-        
-        # Number of traffic dots based on weight
         num_dots = min(int(weight), 8)
-        
-        # Animate dots moving along the road
-        time_offset = time.time() * 2  # Speed of animation
-        
+        time_offset = time.time() * 2
         for i in range(num_dots):
-            # Position along the road (0 to 1)
             progress = ((time_offset + i * 0.3) % 2.0) / 2.0
-            
-            # Calculate dot position
             dot_x = int(start[0] + progress * dx)
             dot_y = int(start[1] + progress * dy)
-            
-            # Draw traffic dot
             dot_size = max(2, int(3 * self.zoom))
-            pygame.gfxdraw.filled_circle(self.screen, dot_x, dot_y, dot_size, 
-                                       (min(255, color[0] + 100), 
-                                        min(255, color[1] + 100), 
-                                        min(255, color[2] + 100)))
+            dot_color = (
+                min(255, color[0] + 100),
+                min(255, color[1] + 100),
+                min(255, color[2] + 100)
+            )
+            pygame.draw.circle(self.screen, dot_color, (dot_x, dot_y), dot_size)
     
-    def _draw_legend(self):
+    def _draw_legend(self, font=None):
         """Draw a legend explaining the traffic visualization."""
         legend_x, legend_y = 10, 10
-        font = pygame.font.SysFont('Arial', 12, bold=True)
-        
+        if font is None:
+            font = self._get_font(12)
         # Background for legend
         legend_bg = pygame.Surface((200, 100))
         legend_bg.fill((0, 0, 0))
         legend_bg.set_alpha(180)
         self.screen.blit(legend_bg, (legend_x, legend_y))
-        
         # Legend text
         legend_items = [
             ("Traffic Legend:", (255, 255, 255)),
@@ -275,7 +246,6 @@ class PygameGraphRenderer:
             ("Red roads: Heavy traffic", (255, 100, 100)),
             ("Moving dots: Active flow", (150, 150, 255))
         ]
-        
         for i, (text, color) in enumerate(legend_items):
             label = font.render(text, True, color)
             self.screen.blit(label, (legend_x + 5, legend_y + 5 + i * 18))

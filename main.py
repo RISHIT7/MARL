@@ -8,7 +8,7 @@ import time
 if __name__ == "__main__":
     env = MaritimeTrafficEnv()
     agent = RandomPolicy(env)
-    renderer = PygameGraphRenderer(env.zones, env.valid_transitions, width=800, height=800, show_traffic_flow=False)
+    renderer = PygameGraphRenderer(env.zones, env.valid_transitions, width=1000, height=1000, show_traffic_flow=False)
     
     print("Interactive Controls:")
     print("  Mouse wheel - Zoom in/out")
@@ -35,7 +35,7 @@ if __name__ == "__main__":
 
     while not terminated and not truncated:
         current_time = time.time()
-        dt = clock.tick(60) / 1000.0  # 60 FPS for smooth interaction
+        dt = clock.tick(30) / 1000.0  # 60 FPS for smooth interaction
         
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
