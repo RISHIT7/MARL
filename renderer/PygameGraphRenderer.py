@@ -124,36 +124,95 @@ class PygameGraphRenderer:
         font_size = max(8, int(12 * zoom))
         font = self._get_font(font_size)
         # Draw edges
-        min_width = 2
-        max_width = int(12 * zoom)
+        min_width = 1
+        max_width = int(5 * zoom)
+        drawn_pairs = set()
         for (src, dst) in self.graph.edges():
-            weight = edge_weights.get((src, dst), 0) + node_values.get((src, dst), 0)
-            start = pos[src]
-            end = pos[dst]
-            if weight == 0:
-                road_width = min_width
-            else:
-                normalized_weight = min(weight / 20.0, 1.0)
-                road_width = int(min_width + normalized_weight * (max_width - min_width))
-            # Traffic intensity color
-            if weight == 0:
-                traffic_color = (60, 60, 60)
-            elif weight <= 5:
-                intensity = weight / 5.0
-                traffic_color = (int(50 + intensity * 155), int(150 + intensity * 105), 50)
-            elif weight <= 15:
-                intensity = (weight - 5) / 10.0
-                traffic_color = (int(205 + intensity * 50), int(255 - intensity * 100), 50)
-            else:
-                traffic_color = (255, 50, 50)
-            if use_straight_lines:
-                pygame.draw.line(screen, traffic_color, start, end, max(1, road_width))
-            else:
-                self._draw_curved_road(start, end, road_width, traffic_color)
-            if show_traffic_flow and weight > 3 and not use_straight_lines:
-                self._draw_traffic_flow(start, end, weight, traffic_color)
+            # Only draw each bidirectional pair once, with offset
+            if (dst, src) in self.graph.edges and (dst, src) not in drawn_pairs:
+                # Bidirectional: draw both edges side by side
+                start = pos[src]
+                end = pos[dst]
+                rev_start = pos[dst]
+                rev_end = pos[src]
+                # Compute perpendicular offset
+                dx = end[0] - start[0]
+                dy = end[1] - start[1]
+                length = math.hypot(dx, dy)
+                if length == 0:
+                    offset = (0, 0)
+                else:
+                    perp_x = -dy / length
+                    perp_y = dx / length
+                    offset_amt = 6  # pixels between the two lines
+                    offset = (int(perp_x * offset_amt), int(perp_y * offset_amt))
+                # Draw src->dst offset one way, dst->src offset the other
+                for direction, (a, b) in [(1, (src, dst)), (-1, (dst, src))]:
+                    w = edge_weights.get((a, b), 0) + node_values.get((a, b), 0)
+                    if w == 0:
+                        road_width = min_width
+                    else:
+                        normalized_weight = min(w / 20.0, 1.0)
+                        road_width = int(min_width + normalized_weight * (max_width - min_width))
+                    # Traffic intensity color
+                    if w == 0:
+                        traffic_color = (60, 60, 60)
+                    elif w <= 5:
+                        intensity = w / 5.0
+                        traffic_color = (int(50 + intensity * 155), int(150 + intensity * 105), 50)
+                    elif w <= 15:
+                        intensity = (w - 5) / 10.0
+                        traffic_color = (int(205 + intensity * 50), int(255 - intensity * 100), 50)
+                    else:
+                        traffic_color = (255, 50, 50)
+                    s = pos[a]
+                    e = pos[b]
+                    if use_straight_lines:
+                        pygame.draw.line(screen, traffic_color,
+                                         (s[0] + direction*offset[0], s[1] + direction*offset[1]),
+                                         (e[0] + direction*offset[0], e[1] + direction*offset[1]),
+                                         max(1, road_width))
+                    else:
+                        self._draw_curved_road(
+                            (s[0] + direction*offset[0], s[1] + direction*offset[1]),
+                            (e[0] + direction*offset[0], e[1] + direction*offset[1]),
+                            road_width, traffic_color)
+                    if show_traffic_flow and w > 3 and not use_straight_lines:
+                        self._draw_traffic_flow(
+                            (s[0] + direction*offset[0], s[1] + direction*offset[1]),
+                            (e[0] + direction*offset[0], e[1] + direction*offset[1]),
+                            w, traffic_color)
+                drawn_pairs.add((src, dst))
+                drawn_pairs.add((dst, src))
+            elif (dst, src) not in self.graph.edges:
+                # Unidirectional: draw normally
+                weight = edge_weights.get((src, dst), 0) + node_values.get((src, dst), 0)
+                start = pos[src]
+                end = pos[dst]
+                if weight == 0:
+                    road_width = min_width
+                else:
+                    normalized_weight = min(weight / 20.0, 1.0)
+                    road_width = int(min_width + normalized_weight * (max_width - min_width))
+                # Traffic intensity color
+                if weight == 0:
+                    traffic_color = (60, 60, 60)
+                elif weight <= 5:
+                    intensity = weight / 5.0
+                    traffic_color = (int(50 + intensity * 155), int(150 + intensity * 105), 50)
+                elif weight <= 15:
+                    intensity = (weight - 5) / 10.0
+                    traffic_color = (int(205 + intensity * 50), int(255 - intensity * 100), 50)
+                else:
+                    traffic_color = (255, 50, 50)
+                if use_straight_lines:
+                    pygame.draw.line(screen, traffic_color, start, end, max(1, road_width))
+                else:
+                    self._draw_curved_road(start, end, road_width, traffic_color)
+                if show_traffic_flow and weight > 3 and not use_straight_lines:
+                    self._draw_traffic_flow(start, end, weight, traffic_color)
         # Draw nodes and labels
-        junction_radius = max(3, int(5 * zoom))
+        junction_radius = max(8, int(14 * zoom))
         for z in zones:
             x, y = pos[z]
             pygame.draw.circle(screen, (255, 255, 255), (x, y), junction_radius)
