@@ -14,12 +14,14 @@ class MaritimeTrafficGraph:
         self.node_values = {z: 0 for z in zones}
         self.edge_weights = {(u, v): 0 for u, v in valid_transitions}
 
-        self.pos = nx.spring_layout(self.G, seed=42)
+        self.pos = nx.spring_layout(self.G, seed=43)
         self.frame = 0
         self.node_size_scale = 80 / math.sqrt(len(zones) + 1)
 
     def update(self, node_values, edge_weights):
         self.frame += 1
+        self.prev_node_values = self.node_values.copy()
+        self.prev_edge_weights = self.edge_weights.copy()
         self.node_values = node_values
         self.edge_weights = edge_weights
 
@@ -108,7 +110,7 @@ class MaritimeTrafficGraph:
             marker=dict(
                 size=sizes,
                 color=colors,
-                line=dict(width=10, color='white')
+                line=dict(width=0, color='white')
             ),
             showlegend=False
         ))
@@ -121,9 +123,60 @@ class MaritimeTrafficGraph:
             hovermode='closest',
         )
         return fig
+    
+    def generate_animation_figure(self, t, steps=10):
+    # Default to zeros if this is the first update
+        prev_nodes = getattr(self, "prev_node_values", self.node_values)
+        prev_edges = getattr(self, "prev_edge_weights", self.edge_weights)
+
+        frames = []
+
+        for i in range(steps + 1):
+            alpha = i / steps
+            interpolated_nodes = {
+                z: int((1 - alpha) * prev_nodes.get(z, 0) + alpha * self.node_values.get(z, 0))
+                for z in self.G.nodes()
+            }
+            interpolated_edges = {
+                (u, v): int((1 - alpha) * prev_edges.get((u, v), 0) + alpha * self.edge_weights.get((u, v), 0))
+                for u, v in self.G.edges()
+            }
+
+            # Temporarily override state
+            self.node_values = interpolated_nodes
+            self.edge_weights = interpolated_edges
+
+            # Generate a single frame (no layout overhead)
+            frame = go.Frame(
+                data=self.create_figure(t + alpha).data,
+                name=f"frame_{i}"
+            )
+            frames.append(frame)
+
+        # Restore real values
+        self.node_values = self.node_values
+        self.edge_weights = self.edge_weights
+
+        fig = self.create_figure(t)
+        fig.frames = frames
+        fig.update_layout(
+            updatemenus=[{
+                "type": "buttons",
+                "buttons": [{
+                    "label": "▶️ Play",
+                    "method": "animate",
+                    "args": [None, {"frame": {"duration": 100, "redraw": True}, "fromcurrent": True}]
+                }]
+            }]
+        )
+        return fig
+
+
     def reset(self):
         """Reset the graph to frame 0 and optionally reinitialize traffic values."""
         self.frame = 0
+        self.prev_node_values = self.node_values.copy()
+        self.prev_edge_weights = self.edge_weights.copy()
         for node in self.G.nodes():
             self.G.nodes[node]['value'] = 0
         for u, v in self.G.edges():

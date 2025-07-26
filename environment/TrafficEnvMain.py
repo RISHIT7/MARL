@@ -4,15 +4,10 @@ from collections import defaultdict
 import numpy as np
 from environment.parameters import *
 from math import comb
-from Visualization.graph_renderer import MaritimeTrafficGraph
-import dash
-from dash import dcc, html, Input, Output
-import webbrowser
 
 class MaritimeTrafficEnv(gym.Env):
-	def __init__(self,render_mode):
+	def __init__(self):
 		super().__init__()
-		self.render_mode = render_mode
 		print(f"Number of Vessels {M}")
 		self.np_random = None
 		# Environment parameters
@@ -61,15 +56,7 @@ class MaritimeTrafficEnv(gym.Env):
 		self.capacities = {z: CAPACITIES for z in self.zones}
 		self.w_r = W_R
 		self.w_d = W_D
-		self.renderer = None  # Will be MaritimeTrafficGraph
-		self._last_obs = None
-		# self.graph = MaritimeTrafficGraph(
-		#     zones=self.zones,
-		#     valid_transitions=self.valid_transitions,
-		#     node_vmax=50,  # Tune based on expected traffic
-		#     edge_vmax=50
-		# )
-		
+		self._last_obs = None		
 		self.reset()
 
 	def reset(self, seed=None):
@@ -96,32 +83,23 @@ class MaritimeTrafficEnv(gym.Env):
 		
 		self._last_obs = self._get_state_vector()
 	
-		if self.renderer is not None:
-			self.renderer.reset()
-
 		return self._last_obs, {}
-		# return self._get_state_vector(), {}
 
 	def render(self):
-		if self.render_mode != "human":
-			return  # Do nothing if render mode is not human
+		pass
+		# if self.render_mode != "human":
+		# 	return
 
-		if self.renderer is None:
-			self.initialize_renderer()
+		# if self.renderer is not None:
+		# 	self.renderer.update(node_values=self.n_tot, edge_weights=self.edge_weight)
 
-			# Only launch Dash once in a separate thread
-			import threading
-			dash_thread = threading.Thread(target=self._launch_dash, daemon=True)
-			dash_thread.start()
-			webbrowser.open("http://localhost:8050", new=0, autoraise=True)
-		else:
-			# Update the graph in-place
-			self.renderer.update(node_values=self.n_tot, edge_weights=self.edge_weight)
-			self._last_animated_fig = self.renderer.generate_animation_figure(self.t)
-			
+		
 	def close(self):
-		if self.renderer:
-			self.renderer = None
+		pass
+		# if self.renderer is not None:
+		# 	self.renderer.stop_render_loop()
+		# 	pygame.quit()
+		# 	self.renderer = None
 
 	def step(self, action):
 		self.t += 1
@@ -261,11 +239,11 @@ class MaritimeTrafficEnv(gym.Env):
 		# info = {}
 		self._last_obs = self._get_state_vector()
 
-		if self.renderer is not None:
-			# state_info = reconstruct(self._last_obs, self.zones, self.H, self.t)
-			# n_total = state_info['n_total']
-			# edge_weights = state_info['edge_weight']
-			self.renderer.update(node_values=self.n_tot, edge_weights=self.edge_weight)
+		# if self.renderer is not None:
+		# 	# state_info = reconstruct(self._last_obs, self.zones, self.H, self.t)
+		# 	# n_total = state_info['n_total']
+		# 	# edge_weights = state_info['edge_weight']
+		# 	self.renderer.update(node_values=self.n_tot, edge_weights=self.edge_weight)
 
 		return self._last_obs, reward, done, False, {}
 		
@@ -338,96 +316,43 @@ class MaritimeTrafficEnv(gym.Env):
 				
 		return -total_penalty  
 
-	def initialize_renderer(self):
-		self.renderer = MaritimeTrafficGraph(
-			zones=self.zones,
-			valid_transitions=self.valid_transitions,
-			node_vmax=M,
-			edge_vmax=M
-		)
+	# def initialize_renderer(self):
+	# 	self.renderer = PygameTrafficRenderer(
+	# 		zones=self.zones,
+	# 		valid_transitions=self.valid_transitions
+	# 	)
 
-	def get_graph_figure(self):
-		# return self.renderer.generate_animation_figure(self.t)if self.renderer else None
-		return getattr(self, "_last_animated_fig", None)
+	# def get_stats_text(self):
+	# 	lines = [f"Time step: {self.t}"]
+	# 	lines.append("Zone-wise Ship Count:")
+	# 	for z in self.zones:
+	# 		lines.append(f"  {z}: {self.n_tot.get(z, 0)}")
 
-	def get_stats_text(self):
-		lines = [f"Time step: {self.t}"]
-		lines.append("Zone-wise Ship Count:")
-		for z in self.zones:
-			lines.append(f"  {z}: {self.n_tot.get(z, 0)}")
+	# 	lines.append(f"Action: {np.zeros(self.action_space.shape)}")
+	# 	lines.append("Total ships per zone (n_total):")
+	# 	for zone, total in self.n_tot.items():
+	# 		lines.append(f"  {zone}: {total}")
 
-		lines.append(f"Action: {np.zeros(self.action_space.shape)}")
-		lines.append("Total ships per zone (n_total):")
-		for zone, total in self.n_tot.items():
-			lines.append(f"  {zone}: {total}")
+	# 	lines.append("Arrived ships per zone (n_arr):")
+	# 	for zone, total in self.n_arr.items():
+	# 		lines.append(f"  {zone}: {total}")
 
-		lines.append("Arrived ships per zone (n_arr):")
-		for zone, total in self.n_arr.items():
-			lines.append(f"  {zone}: {total}")
-
-		lines.append("\nn_tilda (future transit commitments):")
-		for key, val in sorted(self.n_tilda.items()):
-			lines.append(f"  {key}: {int(val)}")
+	# 	lines.append("\nn_tilda (future transit commitments):")
+	# 	for key, val in sorted(self.n_tilda.items()):
+	# 		lines.append(f"  {key}: {int(val)}")
 		
-		lines.append("\nn_nxt (routing decisions this step):")
-		for key, val in sorted(self.n_nxt.items()):
-			lines.append(f"  {key}: {int(val)}")
+	# 	lines.append("\nn_nxt (routing decisions this step):")
+	# 	for key, val in sorted(self.n_nxt.items()):
+	# 		lines.append(f"  {key}: {int(val)}")
 
-		lines.append("\nn_txn (committed future transits):")
-		for key, val in sorted(self.n_txn.items()):
-			if val != 0:
-				lines.append(f"  {key}: {int(val)}")
+	# 	lines.append("\nn_txn (committed future transits):")
+	# 	for key, val in sorted(self.n_txn.items()):
+	# 		if val != 0:
+	# 			lines.append(f"  {key}: {int(val)}")
 		
-		return "\n".join(lines)
+	# 	return "\n".join(lines)
 
-	def step_forward(self):
-		action = np.zeros(self.action_space.shape, dtype=np.float32)
-		obs, reward, done, truncated, info = self.step(action)
-		return self.get_graph_figure(), self.get_stats_text()
-
-	def _launch_dash(self):
-		app = dash.Dash(__name__)
-		app.title = f"Maritime Traffic Simulation Traffic at {self.t}"
-
-		app.layout = html.Div([
-			html.H1("Maritime Traffic Simulation", style={"textAlign": "center"}),
-
-			html.Div([
-				dcc.Graph(
-					id="traffic-graph",
-					figure=self.get_graph_figure(),
-					style={"height": "65%", "width": "65%", "padding": "10px"}
-				),
-				html.Div(
-					id="stats",
-					style={
-						"whiteSpace": "pre-line",
-						"padding": "10px",
-						"width": "30%",
-						"overflowY": "auto",
-						"borderLeft": "1px solid #ccc"
-					}
-				)
-			], style={
-				"display": "flex",
-				"flexDirection": "row",
-				"justifyContent": "space-between",
-				"alignItems": "flex-start",
-				"padding": "0px 40px"
-			}),
-
-			dcc.Interval(
-				id="interval-update",
-				interval=500,  # milliseconds
-				n_intervals=0
-			)
-		])
-
-		@app.callback(
-			[Output("traffic-graph", "figure"),
-			Output("stats", "children")],
-			Input("interval-update", "n_intervals")
-		)
-		def update_graph(n):
-			return self.get_graph_figure(), self.get_stats_text()
-		app.run(debug=False, use_reloader=False, port=8050)
+	# def step_forward(self):
+	# 	action = np.zeros(self.action_space.shape, dtype=np.float32)
+	# 	obs, reward, done, truncated, info = self.step(action)
+	# 	return self.get_graph_figure(), self.get_stats_text()

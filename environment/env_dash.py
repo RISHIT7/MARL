@@ -250,7 +250,8 @@ class MaritimeTrafficEnv(gym.Env):
             _ = self.n_tot[z]  # forces default 0 if missing
         
 
-        info = {}
+        info = {reward: reward}
+        print(reward)
         # Build stats text
         # print(f"Timestep: {self.t}")
         # print("Zone-wise Ship Count:")
@@ -370,7 +371,7 @@ class MaritimeTrafficEnv(gym.Env):
         # n_total = self.n_tot
         # edge_weights = self.edge_weight
         self.graph.update(self.n_tot, self.edge_weight)
-        return self.graph.create_figure(self.t)
+        return self.graph.generate_animation_figure(self.t)
 
     def get_stats_text(self):
         # state_info = reconstruct(self._get_state_vector(), self.zones, self.H, self.t)
