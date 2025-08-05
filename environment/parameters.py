@@ -3,12 +3,12 @@ W_R = 1.0
 W_D = 1.0
 
 # Grid network parameters
-GRID_WIDTH = 10
-GRID_HEIGHT = 10
-NODES = GRID_WIDTH * GRID_HEIGHT  # 100 nodes in a 10x10 grid
+GRID_WIDTH = 4
+GRID_HEIGHT = 4
+NODES = GRID_WIDTH * GRID_HEIGHT  # 16 nodes in a 4x4 grid
 
 # Arrival nodes (top row)
-ARRIVAL_NODES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+ARRIVAL_NODES = [1, 2, 3, 4]
 
 # Generate grid edges - each node connects to its neighbors (right and down)
 EDGES = []
@@ -30,15 +30,15 @@ for row in range(GRID_HEIGHT - 1):
         EDGES.append((node2, node1))  # Bidirectional
 
 # Terminal nodes (bottom row)
-TERMINAL_NODES = [91, 92, 93, 94, 95, 96, 97, 98, 99, 100]
+TERMINAL_NODES = [13, 14, 15, 16]
 
 # Simple arrival distribution - equal probability for each arrival node and time step
 ARRIVAL_DIST = {}
-total_entries = len(ARRIVAL_NODES) * 10  # 10 nodes * 10 time steps = 100 entries
+total_entries = len(ARRIVAL_NODES) * 4  # 4 nodes * 4 time steps = 16 entries
 probability_per_entry = 1.0 / total_entries
 
 for node in ARRIVAL_NODES:
-    for time_step in range(1, 11):
+    for time_step in range(1, 5):
         ARRIVAL_DIST[(node, time_step)] = probability_per_entry
 
 T_MIN = 1
