@@ -1,14 +1,19 @@
 from environment.TrafficEnvMain import MaritimeTrafficEnv
 from policy.RandomPolicy import RandomPolicy
 import pygame
-from renderer.PygameGraphRenderer import PygameGraphRenderer  # Your custom file
+from renderer.PygameGraphRenderer import PygameGraphRenderer
 
 import time
 
 if __name__ == "__main__":
     env = MaritimeTrafficEnv()
     agent = RandomPolicy(env)
-    renderer = PygameGraphRenderer(env.zones, env.valid_transitions, width=1000, height=1000, show_traffic_flow=False)
+    renderer = PygameGraphRenderer(
+        zones=env.zones, 
+        valid_transitions=env.valid_transitions, 
+        width=1000, 
+        height=1000, 
+        show_traffic_flow=False)
     
     print("Interactive Controls:")
     print("  Mouse wheel - Zoom in/out")
@@ -35,8 +40,8 @@ if __name__ == "__main__":
 
     while not terminated and not truncated:
         current_time = time.time()
-        dt = clock.tick(30) / 1000.0  # 60 FPS for smooth interaction
-        
+        dt = clock.tick(60) / 1000.0  # 60 FPS for smooth interaction
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 terminated = True
@@ -47,10 +52,12 @@ if __name__ == "__main__":
                     last_mouse_pos = event.pos
                 elif event.button == 4:  # Mouse wheel up (zoom in)
                     zoom_level = min(zoom_level * 1.1, 5.0)
-                    renderer.set_zoom(zoom_level)
+                    if hasattr(renderer, 'set_zoom'):
+                        renderer.set_zoom(zoom_level)
                 elif event.button == 5:  # Mouse wheel down (zoom out)
                     zoom_level = max(zoom_level / 1.1, 0.2)
-                    renderer.set_zoom(zoom_level)
+                    if hasattr(renderer, 'set_zoom'):
+                        renderer.set_zoom(zoom_level)
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:  # Left mouse button
                     dragging = False
@@ -62,7 +69,8 @@ if __name__ == "__main__":
                     dy = mouse_y - last_mouse_pos[1]
                     pan_x += dx
                     pan_y += dy
-                    renderer.set_pan(pan_x, pan_y)
+                    if hasattr(renderer, 'set_pan'):
+                        renderer.set_pan(pan_x, pan_y)
                     last_mouse_pos = event.pos
 
         # Auto-update simulation at specified interval
@@ -70,9 +78,28 @@ if __name__ == "__main__":
             action = agent.select_action()
             obs, reward, terminated, truncated, info = env.step(action)
             last_step_time = current_time
+            print(f"Step completed - Reward: {reward}, Terminated: {terminated}")
 
         # Update renderer every frame for smooth visuals
-        renderer.update(env.n_tot, env.edge_weight)
+        try:
+            # Check for common environment state attributes
+            if hasattr(env, 'state') and env.state is not None:
+                # Use environment state if available
+                traffic_data = getattr(env.state, 'flows', {}) if hasattr(env.state, 'flows') else {}
+                edge_data = getattr(env.state, 'capacities', {}) if hasattr(env.state, 'capacities') else {}
+                renderer.update(traffic_data, edge_data)
+            elif hasattr(env, 'current_traffic'):
+                renderer.update(env.current_traffic, getattr(env, 'edge_weights', {}))
+            elif hasattr(env, 'n_tot'):
+                renderer.update(env.n_tot, getattr(env, 'edge_weight', {}))
+            else:
+                # Fallback with empty data
+                renderer.update({}, {})
+        except Exception as e:
+            print(f"Renderer update error: {e}")
+            # Continue without crashing
+            pass
 
     renderer.close()
-    env.close()
+    if hasattr(env, 'close'):
+        env.close()
