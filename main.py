@@ -1,4 +1,4 @@
-from environment.TrafficEnvMain import MaritimeTrafficEnv
+from environment.TrafficEnvMain import RoadTrafficEnv
 from policy.RandomPolicy import RandomPolicy
 import pygame
 from renderer.PygameGraphRenderer import PygameGraphRenderer
@@ -6,11 +6,26 @@ from renderer.PygameGraphRenderer import PygameGraphRenderer
 import time
 
 if __name__ == "__main__":
-    env = MaritimeTrafficEnv()
+    env = RoadTrafficEnv()
     agent = RandomPolicy(env)
+    
+    # Create junction-to-junction transitions for renderer compatibility
+    junction_transitions = []
+    for i in env.arrival_junctions:
+        junction_transitions.append(("j_source", i))
+    
+    # Convert road connections back to junction connections for visualization
+    for road in env.roads:
+        if not road.startswith("road_source"):
+            if "_to_" in road:
+                parts = road.replace("road_", "").split("_to_")
+                if len(parts) == 2:
+                    src, dest = parts
+                    junction_transitions.append((f"j_{src}", f"j_{dest}"))
+    
     renderer = PygameGraphRenderer(
-        zones=env.zones, 
-        valid_transitions=env.valid_transitions, 
+        zones=env.junctions,  # Use junctions instead of zones
+        valid_transitions=junction_transitions,  # Junction-to-junction transitions
         width=1000, 
         height=1000, 
         show_traffic_flow=False)
@@ -78,23 +93,43 @@ if __name__ == "__main__":
             action = agent.select_action()
             obs, reward, terminated, truncated, info = env.step(action)
             last_step_time = current_time
-            print(f"Step completed - Reward: {reward}, Terminated: {terminated}")
+            print(f"Step {env.t} - Reward: {reward:.2f}, Terminated: {terminated}")
+            
+            # Print road traffic information
+            total_vehicles = sum(env.n_road_tot.values())
+            print(f"Total vehicles on roads: {total_vehicles}")
+            if total_vehicles > 0:
+                print("Road traffic:")
+                for road, count in env.n_road_tot.items():
+                    if count > 0:
+                        capacity = env.road_capacities[road]
+                        utilization = (count / capacity) * 100 if capacity > 0 else 0
+                        print(f"  {road}: {count}/{capacity} vehicles ({utilization:.1f}%)")
 
         # Update renderer every frame for smooth visuals
         try:
-            # Check for common environment state attributes
-            if hasattr(env, 'state') and env.state is not None:
-                # Use environment state if available
-                traffic_data = getattr(env.state, 'flows', {}) if hasattr(env.state, 'flows') else {}
-                edge_data = getattr(env.state, 'capacities', {}) if hasattr(env.state, 'capacities') else {}
-                renderer.update(traffic_data, edge_data)
-            elif hasattr(env, 'current_traffic'):
-                renderer.update(env.current_traffic, getattr(env, 'edge_weights', {}))
-            elif hasattr(env, 'n_tot'):
-                renderer.update(env.n_tot, getattr(env, 'edge_weight', {}))
-            else:
-                # Fallback with empty data
-                renderer.update({}, {})
+            # Convert road-based data to junction-based data for renderer
+            junction_data = {}
+            edge_data = {}
+            
+            # Since we removed junction tracking, use empty junction data
+            # Set all junctions to 0 vehicles
+            for junction in env.junctions:
+                junction_data[junction] = 0
+            
+            # Convert road traffic to edge weights for visualization
+            for road, count in env.n_road_tot.items():
+                if road.startswith("road_source_to_"):
+                    dest = road.split('_')[-1]
+                    edge_data[("j_source", f"j_{dest}")] = count
+                elif "_to_" in road:
+                    parts = road.replace("road_", "").split("_to_")
+                    if len(parts) == 2:
+                        src, dest = parts
+                        edge_data[(f"j_{src}", f"j_{dest}")] = count
+            
+            renderer.update(junction_data, edge_data)
+            
         except Exception as e:
             print(f"Renderer update error: {e}")
             # Continue without crashing

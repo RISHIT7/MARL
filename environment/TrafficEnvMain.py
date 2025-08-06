@@ -103,22 +103,20 @@ class RoadTrafficEnv(gym.Env):
         
         # Initialize count vectors for road-based system
         self.n_road_txn = defaultdict(int)  # (road, τ) - vehicles in transit on road
-        self.n_junction_arr = defaultdict(int)  # junction - vehicles at junction
         self.n_road_nxt = defaultdict(int)  # road - vehicles choosing road
         self.n_road_tilda = defaultdict(int)  # (road, τ) - committed road usage
-        self.n_road_tot = defaultdict(int)  # road - total vehicles on road
-        self.n_junction_tot = defaultdict(int)  # junction - total vehicles at junction
-        
-        # Start all vehicles at source junction
-        self.n_junction_tot['j_source'] = M
+        self.n_road_tot = defaultdict(int)
         
         self.t = 0
         
-        # Generate arrival schedule for source to arrival junctions
-        self.arrival_schedule = self.generate_arrival_schedule()
+        # Generate initial arrival schedule directly on roads
+        self.generate_arrival_schedule()
         
-        # Alpha probabilities for road selection from each junction
+        # Alpha probabilities for road selection
         self.alpha = self.equal_alpha()
+        
+        # Initial update of totals
+        self._update_totals()
         
         self._last_obs = self._get_state_vector()
         return self._last_obs, {}
@@ -146,56 +144,58 @@ class RoadTrafficEnv(gym.Env):
         beta_vals = 1.0 / (1.0 + np.exp(-action))
         beta = {road: beta_vals[i] for i, road in enumerate(self.roads)}
 
-        # Reset junction arrivals (except terminals)
-        self.n_junction_arr = {
-            j: self.n_junction_arr[j] if (j in self.terminal_junctions and j in self.n_junction_arr.keys()) else 0
-            for j in self.junctions
-        }
-
-        # 1. Update n_junction_arr - vehicles completing road transit
-        for (road, tau), count in list(self.n_road_tilda.items()):
-            if tau == self.t and count > 0:
-                dest_junction = self._get_road_destination(road)
-                self.n_junction_arr[dest_junction] += count
-
-        for (road, tau), count in list(self.n_road_txn.items()):
-            if tau == self.t:
-                dest_junction = self._get_road_destination(road)
-                self.n_junction_arr[dest_junction] += count
-
-        # Clean up zero entries
-        self.n_junction_arr = {j: count for j, count in self.n_junction_arr.items() if count > 0}
-
-        # 2. Update n_road_nxt - vehicles at junctions choosing roads
+        # 1. Reset n_road_nxt for this timestep
         self.n_road_nxt = defaultdict(int)
-        for j in self.junctions:
-            if j in self.terminal_junctions:
-                continue
-
-            n_arr_j = self.n_junction_arr.get(j, 0)
-            if n_arr_j > 0:
-                available_roads = self._get_roads_from_junction(j)
-                if available_roads and j in self.alpha:
-                    probs = np.array([self.alpha[j].get(road, 0) for road in available_roads])
-                    if probs.sum() > 0:
-                        probs = probs / probs.sum()  # Normalize
-                        sampled_counts = self.np_random.multinomial(n=n_arr_j, pvals=probs)
-                        for i, road in enumerate(available_roads):
-                            self.n_road_nxt[road] += sampled_counts[i]
-
-        # 3. Update n_road_txn - vehicles committed to roads
+        
+        # 2. Process vehicles completing transit (from n_txn)
+        completed_vehicles = defaultdict(int)
         new_n_road_txn = defaultdict(int)
-        for road in self.roads:
-            for tau in range(self.t + 1, self.H + 1):
-                prev_txn = self.n_road_txn.get((road, tau), 0)
-                new_commit = self.n_road_tilda.get((road, tau), 0)
-                new_n_road_txn[(road, tau)] = prev_txn + new_commit
+        
+        for (road, tau), count in self.n_road_txn.items():
+            if tau == self.t and count > 0:
+                # Vehicles complete this road
+                dest_junction = self._get_road_destination(road)
+                completed_vehicles[dest_junction] += count
+            elif tau > self.t:
+                # Keep future transits
+                new_n_road_txn[(road, tau)] = count
+    
         self.n_road_txn = new_n_road_txn
 
-        # 4. Update n_road_tilda - future road commitments
-        self.n_road_tilda = defaultdict(int)
-        for road in self.roads:
-            count = self.n_road_nxt.get(road, 0)
+        # 3. Process vehicles completing commitments (from n_road_tilda) 
+        new_n_road_tilda = defaultdict(int)
+        
+        for (road, tau), count in self.n_road_tilda.items():
+            if tau == self.t and count > 0:
+                # Move committed vehicles to transit
+                self.n_road_txn[(road, tau)] = self.n_road_txn.get((road, tau), 0) + count
+                # These vehicles also complete transit immediately
+                dest_junction = self._get_road_destination(road)
+                completed_vehicles[dest_junction] += count
+            elif tau > self.t:
+                # Keep future commitments
+                new_n_road_tilda[(road, tau)] = count
+    
+        self.n_road_tilda = new_n_road_tilda
+
+        # 4. Route completed vehicles to next roads
+        for junction, vehicle_count in completed_vehicles.items():
+            if junction in self.terminal_junctions or vehicle_count <= 0:
+                continue
+                
+            available_roads = self._get_roads_from_junction(junction)
+            if available_roads:
+                # Equal distribution for now
+                per_road = vehicle_count // len(available_roads)
+                remainder = vehicle_count % len(available_roads)
+                
+                for i, road in enumerate(available_roads):
+                    self.n_road_nxt[road] += per_road
+                    if i < remainder:  # Distribute remainder
+                        self.n_road_nxt[road] += 1
+
+        # 5. Create new commitments from road choices
+        for road, count in self.n_road_nxt.items():
             if count <= 0:
                 continue
 
@@ -204,27 +204,31 @@ class RoadTrafficEnv(gym.Env):
             n_trials = t_max - t_min
             p_success = beta.get(road, 0.5)
 
-            deltas = np.arange(n_trials + 1)
-            pmf = np.array([
-                comb(n_trials, d) * (p_success**d) * ((1-p_success)**(n_trials-d))
-                for d in deltas
-            ], dtype=np.float64)
-            pmf /= pmf.sum()
+            if n_trials == 0:
+                # Deterministic travel time
+                tau = self.t + t_min
+                self.n_road_tilda[(road, int(tau))] += count
+            else:
+                # Stochastic travel time
+                deltas = np.arange(n_trials + 1)
+                pmf = np.array([
+                    comb(n_trials, d) * (p_success**d) * ((1-p_success)**(n_trials-d))
+                    for d in deltas
+                ], dtype=np.float64)
+                pmf /= pmf.sum()
 
-            sampled = self.np_random.multinomial(n=count, pvals=pmf)
-            for delta, vehicles in zip(deltas, sampled):
-                if vehicles != 0:
-                    tau = self.t + t_min + delta
-                    self.n_road_tilda[(road, int(tau))] += vehicles
+                sampled = self.np_random.multinomial(n=count, pvals=pmf)
+                for delta, vehicles in zip(deltas, sampled):
+                    if vehicles > 0:
+                        tau = self.t + t_min + delta
+                        self.n_road_tilda[(road, int(tau))] += vehicles
 
-        # 5. Compute reward based on road and junction capacities
+        # 6. Update totals and compute reward
+        self._update_totals()
         reward = self._compute_reward()
         
-        # 6. Check termination
+        # 7. Check termination
         done = self.t >= self.H
-
-        # Update total counts
-        self._update_totals()
         
         self._last_obs = self._get_state_vector()
         return self._last_obs, reward, done, False, {}
@@ -251,40 +255,30 @@ class RoadTrafficEnv(gym.Env):
         return available_roads
 
     def _update_totals(self):
-        """Update total vehicle counts for roads and junctions"""
-        # Reset totals
+        """Update total vehicle counts for roads only"""
         self.n_road_tot = defaultdict(int)
-        self.n_junction_tot = defaultdict(int)
         
-        # Count vehicles at junctions
-        for j, count in self.n_junction_arr.items():
-            self.n_junction_tot[j] += count
-        
-        # Count vehicles on roads (in transit)
+        # Count vehicles in transit on roads (future arrivals)
         for (road, tau), count in self.n_road_txn.items():
+            if tau > self.t:
+                self.n_road_tot[road] += count
+    
+        # Count vehicles committed to roads (not yet started transit)
+        for (road, tau), count in self.n_road_tilda.items():
             if tau > self.t:
                 self.n_road_tot[road] += count
 
     def _compute_reward(self):
-        """Compute reward based on road and junction capacity violations"""
+        """Compute reward based on road capacity violations only"""
         total_penalty = 0.0
         
-        # Road capacity penalties
+        # Road capacity penalties only
         for road in self.roads:
             road_load = self.n_road_tot.get(road, 0)
             road_capacity = self.road_capacities[road]
             excess = max(road_load - road_capacity, 0)
             if excess > 0:
                 total_penalty += self.w_r * excess + self.w_d
-        
-        # Junction capacity penalties (excluding terminals)
-        for j in self.junctions:
-            if j not in self.terminal_junctions:
-                junction_load = self.n_junction_tot.get(j, 0)
-                junction_capacity = self.junction_capacities[j]
-                excess = max(junction_load - junction_capacity, 0)
-                if excess > 0:
-                    total_penalty += self.w_r * excess + self.w_d
         
         return -total_penalty
 
@@ -301,7 +295,10 @@ class RoadTrafficEnv(gym.Env):
         return alpha
 
     def generate_arrival_schedule(self):
-        """Generate arrival schedule from source to arrival junctions"""
+        """Generate arrival schedule directly on roads from source"""
+        if not hasattr(self, 'np_random') or self.np_random is None:
+            return
+            
         elements = list(ARRIVAL_DIST.keys())
         probs = np.array(list(ARRIVAL_DIST.values()))
 
@@ -309,10 +306,14 @@ class RoadTrafficEnv(gym.Env):
             idx = self.np_random.choice(len(elements), p=probs)
             dest, tau = elements[idx]
             road = f"road_source_to_{dest}"
-            self.n_road_txn[(road, tau)] += 1
+            if road in self.roads:  # Ensure road exists
+                self.n_road_txn[(road, tau)] += 1
 
     def _get_state_vector(self):
-        """Convert road and junction counts to state vector"""
+        """Convert road counts to state vector (simplified)"""
+        # Simplified state: only road transit and commitments
+        self.state_size = (self.R * self.H) + (self.R * self.H)
+        
         vec = np.zeros(self.state_size, dtype=np.float32)
         idx = 0
         
@@ -321,21 +322,11 @@ class RoadTrafficEnv(gym.Env):
             for tau in range(1, self.H + 1):
                 vec[idx] = self.n_road_txn.get((road, tau), 0)
                 idx += 1
-        
-        # n_junction_arr: vehicles at junctions
-        for j in self.junctions:
-            vec[idx] = self.n_junction_arr.get(j, 0)
-            idx += 1
-            
-        # n_road_nxt: vehicles choosing roads
-        for road in self.roads:
-            vec[idx] = self.n_road_nxt.get(road, 0)
-            idx += 1
-            
+    
         # n_road_tilda: committed road usage
         for road in self.roads:
             for tau in range(1, self.H + 1):
                 vec[idx] = self.n_road_tilda.get((road, tau), 0)
                 idx += 1
-                
+            
         return vec
