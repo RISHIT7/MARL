@@ -1,4 +1,4 @@
-from environment.maritime_env_dash import MaritimeTrafficEnv
+from environment.TrafficEnv import MaritimeTrafficEnv
 from policy.RandomPolicy import RandomPolicy
 import time
 
